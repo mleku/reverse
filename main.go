@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,9 +54,10 @@ type runArgs struct {
 	Email string `flag:"email,contact email address presented to letsencrypt CA"`
 	HTTP  string `flag:"http,optional address to serve http-to-https redirects and ACME http-01 challenge responses"`
 
-	RTo  time.Duration `flag:"rto,maximum duration before timing out read of the request"`
-	WTo  time.Duration `flag:"wto,maximum duration before timing out write of the response"`
-	Idle time.Duration `flag:"idle,how long idle connection is kept before closing (set rto, wto to 0 to use this)"`
+	RTo   time.Duration `flag:"rto,maximum duration before timing out read of the request"`
+	WTo   time.Duration `flag:"wto,maximum duration before timing out write of the response"`
+	Idle  time.Duration `flag:"idle,how long idle connection is kept before closing (set rto, wto to 0 to use this)"`
+	Certs []string      `arg:"--cert,separate" help:"certificates and the domain they match: eg: mleku.dev:/path/to/cert - this will indicate to load two, one with extension .key and one with .crt, each expected to be PEM encoded TLS private and public keys, respectively"`
 }
 
 func run(ctx context.Context, args runArgs) error {
@@ -63,7 +65,7 @@ func run(ctx context.Context, args runArgs) error {
 		return fmt.Errorf("no cache specified")
 	}
 	srv, httpHandler, err := setupServer(
-		args.Addr, args.Conf, args.Cache, args.Email, args.HSTS,
+		args.Addr, args.Conf, args.Cache, args.Email, args.HSTS, args,
 	)
 	if err != nil {
 		return err
@@ -126,8 +128,59 @@ func run(ctx context.Context, args runArgs) error {
 	return group.Wait()
 }
 
+// TLSConfig returns a TLSConfig that works with a LetsEncrypt automatic SSL cert issuer as well
+// as any provided .pem certificates from providers.
+//
+// The certs are provided in the form "example.com:/path/to/cert.pem"
+func TLSConfig(m *autocert.Manager, certs ...string) (tc *tls.Config) {
+	certMap := make(map[string]*tls.Certificate)
+	var mx sync.Mutex
+	for _, cert := range certs {
+		split := strings.Split(cert, ":")
+		if len(split) != 2 {
+			log.E.F("invalid certificate parameter format: `%s`", cert)
+			continue
+		}
+		var err error
+		var c tls.Certificate
+		if c, err = tls.LoadX509KeyPair(
+			split[1]+".crt", split[1]+".key",
+		); chk.E(err) {
+			continue
+		}
+		certMap[split[0]] = &c
+	}
+	tc = m.TLSConfig()
+	tc.GetCertificate = func(helo *tls.ClientHelloInfo) (
+		cert *tls.Certificate, err error,
+	) {
+		mx.Lock()
+		var own string
+		for i := range certMap {
+			// to also handle explicit subdomain certs, prioritize over a root wildcard.
+			if helo.ServerName == i {
+				own = i
+				break
+			}
+			// if it got to us and ends in the same name dot tld assume the subdomain was
+			// redirected or it's a wildcard certificate, thus only the ending needs to match.
+			if strings.HasSuffix(helo.ServerName, i) {
+				own = i
+				break
+			}
+		}
+		if own != "" {
+			defer mx.Unlock()
+			return certMap[own], nil
+		}
+		mx.Unlock()
+		return m.GetCertificate(helo)
+	}
+	return
+}
+
 func setupServer(
-	addr, mapfile, cacheDir, email string, hsts bool,
+	addr, mapfile, cacheDir, email string, hsts bool, a runArgs,
 ) (*http.Server, http.Handler, error) {
 	mapping, err := readMapping(mapfile)
 	if err != nil {
@@ -154,7 +207,7 @@ func setupServer(
 	srv := &http.Server{
 		Handler:   proxy,
 		Addr:      addr,
-		TLSConfig: m.TLSConfig(),
+		TLSConfig: TLSConfig(&m, a.Certs...),
 	}
 	return srv, m.HTTPHandler(nil), nil
 }
