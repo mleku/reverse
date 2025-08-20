@@ -17,70 +17,275 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/artyom/autoflags"
 	"github.com/mleku/lol/chk"
 	"github.com/mleku/lol/log"
+	"go-simpler.org/env"
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/sync/errgroup"
 )
 
 func main() {
-	args := runArgs{
-		Addr:  ":https",
-		HTTP:  ":http",
-		Conf:  os.Getenv("HOME") + "/.config/reverse/mapping.conf",
-		Cache: os.Getenv("HOME") + "/.cache/reverse",
-		RTo:   time.Minute,
-		WTo:   5 * time.Minute,
-	}
-	autoflags.Parse(&args)
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	if err := run(ctx, args); err != nil {
+	if err := run(ctx); err != nil {
 		log2.Fatal(err)
 	}
 }
 
-type runArgs struct {
-	Addr  string `flag:"addr,address to listen at"`
-	Conf  string `flag:"map,file with host/backend mapping"`
-	Cache string `flag:"cacheDir,path to directory to cache key and certificates"`
-	HSTS  bool   `flag:"hsts,add Strict-Transport-Security header"`
-	Email string `flag:"email,contact email address presented to letsencrypt CA"`
-	HTTP  string `flag:"http,optional address to serve http-to-https redirects and ACME http-01 challenge responses"`
+type C struct {
+	Addr  string `env:"REVERSE_LISTEN" usage:"address to listen at" default:":443"`
+	Conf  string `env:"REVERSE_MAP" usage:"file with host/backend mapping" default:"~/.config/reverse/mapping.conf"`
+	Cache string `env:"REVERSE_CACHE" usage:"path to directory to cache key and certificates" default:"~/.cache/reverse"`
+	HSTS  bool   `env:"REVERSE_HSTS" usage:"add Strict-Transport-Security header" default:"false"`
+	Email string `env:"REVERSE_EMAIL" usage:"contact email address presented to letsencrypt CA"`
+	HTTP  string `env:"REVERSE_HTTP" usage:"optional address to serve http-to-https redirects and ACME http-01 challenge responses" default:":80"`
 
-	RTo   time.Duration `flag:"rto,maximum duration before timing out read of the request"`
-	WTo   time.Duration `flag:"wto,maximum duration before timing out write of the response"`
-	Idle  time.Duration `flag:"idle,how long idle connection is kept before closing (set rto, wto to 0 to use this)"`
-	Certs []string      `flag:"cert" help:"certificates and the domain they match: eg: mleku.dev:/path/to/cert - this will indicate to load two, one with extension .key and one with .crt, each expected to be PEM encoded TLS private and public keys, respectively"`
+	RTo   time.Duration `env:"REVERSE_RTO" usage:"maximum duration before timing out read of the request" default:"1m"`
+	WTo   time.Duration `env:"REVERSE_WTO" usage:"maximum duration before timing out write of the response" default:"5m"`
+	Idle  time.Duration `env:"REVERSE_IDLE" usage:"how long idle connection is kept before closing (set rto, wto to 0 to use this)"`
+	Certs []string      `env:"REVERSE_CERTS" usage:"certificates and the domain they match: eg: mleku.dev:/path/to/cert - this will indicate to load two, one with extension .key and one with .crt, each expected to be PEM encoded TLS private and public keys, respectively"`
 }
 
-func run(ctx context.Context, args runArgs) error {
-	if args.Cache == "" {
+// GetEnv checks if the first command line argument is "env" and returns
+// whether the environment configuration should be printed.
+//
+// # Return Values
+//
+//   - requested: A boolean indicating true if the 'env' argument was
+//     provided, false otherwise.
+//
+// # Expected Behaviour
+//
+// The function returns true when the first command line argument is "env"
+// (case-insensitive), signalling that the environment configuration should be
+// printed. Otherwise, it returns false.
+func GetEnv() (requested bool) {
+	if len(os.Args) > 1 {
+		switch strings.ToLower(os.Args[1]) {
+		case "env":
+			requested = true
+		}
+	}
+	return
+}
+
+// KV is a key/value pair.
+type KV struct{ Key, Value string }
+
+// KVSlice is a sortable slice of key/value pairs, designed for managing
+// configuration data and enabling operations like merging and sorting based on
+// keys.
+type KVSlice []KV
+
+func (kv KVSlice) Len() int           { return len(kv) }
+func (kv KVSlice) Less(i, j int) bool { return kv[i].Key < kv[j].Key }
+func (kv KVSlice) Swap(i, j int)      { kv[i], kv[j] = kv[j], kv[i] }
+
+// Compose merges two KVSlice instances into a new slice where key-value pairs
+// from the second slice override any duplicate keys from the first slice.
+//
+// # Parameters
+//
+//   - kv2: The second KVSlice whose entries will be merged with the receiver.
+//
+// # Return Values
+//
+//   - out: A new KVSlice containing all entries from both slices, with keys
+//     from kv2 taking precedence over keys from the receiver.
+//
+// # Expected Behaviour
+//
+// The method returns a new KVSlice that combines the contents of the receiver
+// and kv2. If any key exists in both slices, the value from kv2 is used. The
+// resulting slice remains sorted by keys as per the KVSlice implementation.
+func (kv KVSlice) Compose(kv2 KVSlice) (out KVSlice) {
+	// duplicate the initial KVSlice
+	for _, p := range kv {
+		out = append(out, p)
+	}
+out:
+	for i, p := range kv2 {
+		for j, q := range out {
+			// if the key is repeated, replace the value
+			if p.Key == q.Key {
+				out[j].Value = kv2[i].Value
+				continue out
+			}
+		}
+		out = append(out, p)
+	}
+	return
+}
+
+// EnvKV generates key/value pairs from a configuration object's struct tags
+//
+// # Parameters
+//
+//   - cfg: A configuration object whose struct fields are processed for env tags
+//
+// # Return Values
+//
+//   - m: A KVSlice containing key/value pairs derived from the config's env tags
+//
+// # Expected Behaviour
+//
+// Processes each field of the config object, extracting values tagged with
+// "env" and converting them to strings. Skips fields without an "env" tag.
+// Handles various value types including strings, integers, booleans, durations,
+// and string slices by joining elements with commas.
+func EnvKV(cfg any) (m KVSlice) {
+	t := reflect.TypeOf(cfg)
+	for i := 0; i < t.NumField(); i++ {
+		k := t.Field(i).Tag.Get("env")
+		v := reflect.ValueOf(cfg).Field(i).Interface()
+		var val string
+		switch v.(type) {
+		case string:
+			val = v.(string)
+		case int, bool, time.Duration:
+			val = fmt.Sprint(v)
+		case []string:
+			arr := v.([]string)
+			if len(arr) > 0 {
+				val = strings.Join(arr, ",")
+			}
+		}
+		// this can happen with embedded structs
+		if k == "" {
+			continue
+		}
+		m = append(m, KV{k, val})
+	}
+	return
+}
+
+// PrintEnv outputs sorted environment key/value pairs from a configuration object
+// to the provided writer
+//
+// # Parameters
+//
+//   - cfg: Pointer to the configuration object containing env tags
+//
+//   - printer: Destination for the output, typically an io.Writer implementation
+//
+// # Expected Behaviour
+//
+// Outputs each environment variable derived from the config's struct tags in
+// sorted order, formatted as "key=value\n" to the specified writer
+func PrintEnv(cfg *C, printer io.Writer) {
+	kvs := EnvKV(*cfg)
+	sort.Sort(kvs)
+	for _, v := range kvs {
+		_, _ = fmt.Fprintf(printer, "%s=%s\n", v.Key, v.Value)
+	}
+}
+
+// PrintHelp prints help information including application version, environment
+// variable configuration, and details about .env file handling to the provided
+// writer
+//
+// # Parameters
+//
+//   - cfg: Configuration object containing app name and config directory path
+//
+//   - printer: Output destination for the help text
+//
+// # Expected Behaviour
+//
+// Prints application name and version followed by environment variable
+// configuration details, explains .env file behaviour including automatic
+// loading and custom path options, and displays current configuration values
+// using PrintEnv. Outputs all information to the specified writer
+func PrintHelp(cfg *C, printer io.Writer) {
+	_, _ = fmt.Fprintf(
+		printer,
+		"Environment variables that configure:\n\n",
+	)
+	env.Usage(cfg, printer, &env.Options{SliceSep: ","})
+	_, _ = fmt.Fprintf(
+		printer,
+		`CLI parameter 'help' also prints this information\n
+use the parameter 'env' to print out the current configuration to the terminal
+
+current configuration:
+
+`,
+	)
+	PrintEnv(cfg, printer)
+	return
+}
+
+// HelpRequested determines if the command line arguments indicate a request for help
+//
+// # Return Values
+//
+//   - help: A boolean value indicating true if a help flag was detected in the
+//     command line arguments, false otherwise
+//
+// # Expected Behaviour
+//
+// The function checks the first command line argument for common help flags and
+// returns true if any of them are present. Returns false if no help flag is found
+func HelpRequested() (help bool) {
+	if len(os.Args) > 1 {
+		switch strings.ToLower(os.Args[1]) {
+		case "help", "-h", "--h", "-help", "--help", "?":
+			help = true
+		}
+	}
+	return
+}
+
+var cfg *C
+
+func run(ctx context.Context) error {
+	var err error
+	cfg = &C{}
+	if err = env.Load(cfg, &env.Options{SliceSep: ","}); chk.T(err) {
+		return err
+	}
+	if cfg.Conf == "" || strings.Contains(cfg.Conf, "~") {
+		cfg.Conf = strings.Replace(cfg.Conf, "~", os.Getenv("HOME"), 1)
+	}
+	if cfg.Cache == "" || strings.Contains(cfg.Cache, "~") {
+		cfg.Cache = strings.Replace(cfg.Cache, "~", os.Getenv("HOME"), 1)
+	}
+	if GetEnv() {
+		PrintEnv(cfg, os.Stdout)
+		os.Exit(0)
+	}
+	if HelpRequested() {
+		PrintHelp(cfg, os.Stderr)
+		os.Exit(0)
+	}
+	if cfg.Cache == "" {
 		return fmt.Errorf("no cache specified")
 	}
 	srv, httpHandler, err := setupServer(
-		args.Addr, args.Conf, args.Cache, args.Email, args.HSTS, args,
+		cfg.Addr, cfg.Conf, cfg.Cache, cfg.Email, cfg.HSTS, cfg,
 	)
 	if err != nil {
 		return err
 	}
 	srv.ReadHeaderTimeout = 5 * time.Second
-	if args.RTo > 0 {
-		srv.ReadTimeout = args.RTo
+	if cfg.RTo > 0 {
+		srv.ReadTimeout = cfg.RTo
 	}
-	if args.WTo > 0 {
-		srv.WriteTimeout = args.WTo
+	if cfg.WTo > 0 {
+		srv.WriteTimeout = cfg.WTo
 	}
 	group, ctx := errgroup.WithContext(ctx)
-	if args.HTTP != "" {
+	if cfg.HTTP != "" {
 		httpServer := http.Server{
-			Addr:         args.HTTP,
+			Addr:         cfg.HTTP,
 			Handler:      httpHandler,
 			ReadTimeout:  10 * time.Second,
 			WriteTimeout: 10 * time.Second,
@@ -97,7 +302,7 @@ func run(ctx context.Context, args runArgs) error {
 			},
 		)
 	}
-	if srv.ReadTimeout != 0 || srv.WriteTimeout != 0 || args.Idle == 0 {
+	if srv.ReadTimeout != 0 || srv.WriteTimeout != 0 || cfg.Idle == 0 {
 		group.Go(func() error { return srv.ListenAndServeTLS("", "") })
 	} else {
 		group.Go(
@@ -108,7 +313,7 @@ func run(ctx context.Context, args runArgs) error {
 				}
 				defer ln.Close()
 				ln = tcpKeepAliveListener{
-					d:           args.Idle,
+					d:           cfg.Idle,
 					TCPListener: ln.(*net.TCPListener),
 				}
 				return srv.ServeTLS(ln, "", "")
@@ -180,7 +385,7 @@ func TLSConfig(m *autocert.Manager, certs ...string) (tc *tls.Config) {
 }
 
 func setupServer(
-	addr, mapfile, cacheDir, email string, hsts bool, a runArgs,
+	addr, mapfile, cacheDir, email string, hsts bool, a *C,
 ) (*http.Server, http.Handler, error) {
 	mapping, err := readMapping(mapfile)
 	if err != nil {
