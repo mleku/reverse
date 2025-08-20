@@ -41,13 +41,12 @@ func main() {
 }
 
 type C struct {
-	Addr  string `env:"REVERSE_LISTEN" usage:"address to listen at" default:":443"`
-	Conf  string `env:"REVERSE_MAP" usage:"file with host/backend mapping" default:"~/.config/reverse/mapping.conf"`
-	Cache string `env:"REVERSE_CACHE" usage:"path to directory to cache key and certificates" default:"~/.cache/reverse"`
-	HSTS  bool   `env:"REVERSE_HSTS" usage:"add Strict-Transport-Security header" default:"false"`
-	Email string `env:"REVERSE_EMAIL" usage:"contact email address presented to letsencrypt CA"`
-	HTTP  string `env:"REVERSE_HTTP" usage:"optional address to serve http-to-https redirects and ACME http-01 challenge responses" default:":80"`
-
+	Addr  string        `env:"REVERSE_LISTEN" usage:"address to listen at" default:":443"`
+	Conf  string        `env:"REVERSE_MAP" usage:"file with host/backend mapping" default:"~/.config/reverse/mapping.conf"`
+	Cache string        `env:"REVERSE_CACHE" usage:"path to directory to cache key and certificates" default:"~/.cache/reverse"`
+	HSTS  bool          `env:"REVERSE_HSTS" usage:"add Strict-Transport-Security header" default:"true"`
+	Email string        `env:"REVERSE_EMAIL" usage:"contact email address presented to letsencrypt CA"`
+	HTTP  string        `env:"REVERSE_HTTP" usage:"optional address to serve http-to-https redirects and ACME http-01 challenge responses" default:":80"`
 	RTo   time.Duration `env:"REVERSE_RTO" usage:"maximum duration before timing out read of the request" default:"1m"`
 	WTo   time.Duration `env:"REVERSE_WTO" usage:"maximum duration before timing out write of the response" default:"5m"`
 	Idle  time.Duration `env:"REVERSE_IDLE" usage:"how long idle connection is kept before closing (set rto, wto to 0 to use this)"`
