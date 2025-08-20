@@ -1,4 +1,4 @@
-module github.com/mleku/reverse
+module reverse.mleku.dev
 
 go 1.25.0
 

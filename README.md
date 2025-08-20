@@ -1,2 +1,0 @@
-# reverse
-simple reverse proxy with letsencrypt, nostr nip-05 and go vanity redirects

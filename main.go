@@ -24,11 +24,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mleku/lol/chk"
-	"github.com/mleku/lol/log"
 	"go-simpler.org/env"
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/sync/errgroup"
+	"lol.mleku.dev/chk"
+	"lol.mleku.dev/log"
 )
 
 func main() {
