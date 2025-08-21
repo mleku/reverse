@@ -451,21 +451,6 @@ func setProxy(mapping map[string]string) (http.Handler, error) {
 				if err := NostrDNS(hn, ba, mux); err != nil {
 					continue
 				}
-				fin := hn + "/favicon.ico"
-				var fi []byte
-				var err error
-				if fi, err = os.ReadFile(fin); !chk.E(err) {
-					fi = defaultFavicon
-				}
-				mux.HandleFunc(
-					hn+"/favicon.ico",
-					func(writer http.ResponseWriter, request *http.Request) {
-						log.I.F("serving %s", fin)
-						if _, err = writer.Write(fi); chk.E(err) {
-							return
-						}
-					},
-				)
 				continue
 			}
 		} else if u, err := url.Parse(ba); err == nil {
@@ -732,7 +717,7 @@ func NostrDNS(hn, ba string, mux *http.ServeMux) (err error) {
 	mux.HandleFunc(
 		hn+"/.well-known/nostr.json",
 		func(writer http.ResponseWriter, request *http.Request) {
-			log.I.Ln("serving nostr json to", hn)
+			log.I.Ln("serving nip-05 to", hn)
 			writer.Header().Set(
 				"Access-Control-Allow-Methods",
 				"GET,HEAD,PUT,PATCH,POST,DELETE",
@@ -747,6 +732,20 @@ func NostrDNS(hn, ba string, mux *http.ServeMux) (err error) {
 				"max-age=0; includeSubDomains",
 			)
 			fmt.Fprint(writer, nostrJSON)
+		},
+	)
+	fin := hn + "/favicon.ico"
+	var fi []byte
+	if fi, err = os.ReadFile(fin); !chk.E(err) {
+		fi = defaultFavicon
+	}
+	mux.HandleFunc(
+		hn+"/favicon.ico",
+		func(writer http.ResponseWriter, request *http.Request) {
+			log.I.F("favicon")
+			if _, err = writer.Write(fi); chk.E(err) {
+				return
+			}
 		},
 	)
 	return
