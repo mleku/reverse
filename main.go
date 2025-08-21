@@ -467,14 +467,17 @@ func setProxy(mapping map[string]string) (http.Handler, error) {
 			Director: func(req *http.Request) {
 				req.URL.Scheme = "http"
 				req.URL.Host = req.Host
+				// Backward-compatible header widely used by apps
 				req.Header.Set("X-Forwarded-Proto", "https")
+				// Standard RFC 7239 Forwarded header
+				appendForwardedHeader(req)
 			},
 			Transport: &http.Transport{
 				Dial: func(netw, addr string) (net.Conn, error) {
 					return net.DialTimeout(network, ba, 5*time.Second)
 				},
 			},
-			ErrorLog:   log2.New(io.Discard, "", 0),
+			ErrorLog:   log2.New(os.Stderr, "reverse", 0),
 			BufferPool: bufPool{},
 		}
 		mux.Handle(hn+"/", rp)
@@ -535,8 +538,80 @@ var bufferPool = &sync.Pool{
 	},
 }
 
+// appendForwardedHeader constructs and appends a RFC 7239 Forwarded header
+// entry for the current proxy hop. It preserves existing Forwarded header
+// values by appending a new entry separated by a comma.
+func appendForwardedHeader(req *http.Request) {
+	// Determine client IP (for=)
+	clientIP := remoteIP(req.RemoteAddr)
+	forPart := "for=" + formatForwardedNode(clientIP)
+
+	// Determine local address (by=) if available
+	byPart := ""
+	if la, ok := req.Context().Value(http.LocalAddrContextKey).(net.Addr); ok && la != nil {
+		lip := localIP(la)
+		if lip != "" {
+			byPart = "by=" + formatForwardedNode(lip)
+		}
+	}
+
+	// Host and proto
+	protoPart := "proto=https"
+	// Quote host to be safe when port is present
+	hostPart := "host=\"" + req.Host + "\""
+
+	parts := []string{forPart}
+	if byPart != "" {
+		parts = append(parts, byPart)
+	}
+	parts = append(parts, protoPart, hostPart)
+	entry := strings.Join(parts, ";")
+
+	existing := req.Header.Get("Forwarded")
+	if existing == "" {
+		req.Header.Set("Forwarded", entry)
+	} else {
+		req.Header.Set("Forwarded", existing+", "+entry)
+	}
+}
+
+// formatForwardedNode formats an IP for use in Forwarded header node
+// identifiers. IPv6 addresses are wrapped as "[ipv6]" and quoted,
+// IPv4 are left as-is. If ip can't be parsed, returns "unknown".
+func formatForwardedNode(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return "unknown"
+	}
+	if strings.Contains(ip, ":") {
+		return "\"[" + ip + "]\""
+	}
+	return ip
+}
+
+// remoteIP extracts the host part from a network address string.
+func remoteIP(addr string) string {
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		return h
+	}
+	return addr
+}
+
+// localIP tries to get the string IP from a net.Addr (e.g., *net.TCPAddr)
+func localIP(addr net.Addr) string {
+	switch v := addr.(type) {
+	case *net.TCPAddr:
+		if v.IP != nil {
+			return v.IP.String()
+		}
+		return remoteIP(v.String())
+	default:
+		return remoteIP(addr.String())
+	}
+}
+
 // newSingleHostReverseProxy is a copy of httputil.NewSingleHostReverseProxy
-// with addition of "X-Forwarded-Proto" header.
+// with addition of "X-Forwarded-Proto" and standard RFC 7239 "Forwarded" header.
 func newSingleHostReverseProxy(target *url.URL) *httputil.ReverseProxy {
 	targetQuery := target.RawQuery
 	director := func(req *http.Request) {
@@ -551,7 +626,10 @@ func newSingleHostReverseProxy(target *url.URL) *httputil.ReverseProxy {
 		if _, ok := req.Header["User-Agent"]; !ok {
 			req.Header.Set("User-Agent", "")
 		}
+		// Backward-compatible header widely used by apps
 		req.Header.Set("X-Forwarded-Proto", "https")
+		// Standard RFC 7239 Forwarded header
+		appendForwardedHeader(req)
 	}
 	return &httputil.ReverseProxy{Director: director}
 }
