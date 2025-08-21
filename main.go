@@ -460,6 +460,7 @@ func setProxy(mapping map[string]string) (http.Handler, error) {
 				mux.HandleFunc(
 					hn+"/favicon.ico",
 					func(writer http.ResponseWriter, request *http.Request) {
+						log.I.F("serving %s", fin)
 						if _, err = writer.Write(fi); chk.E(err) {
 							return
 						}
@@ -731,7 +732,7 @@ func NostrDNS(hn, ba string, mux *http.ServeMux) (err error) {
 	mux.HandleFunc(
 		hn+"/.well-known/nostr.json",
 		func(writer http.ResponseWriter, request *http.Request) {
-			log.T.Ln("serving nostr json to", hn)
+			log.I.Ln("serving nostr json to", hn)
 			writer.Header().Set(
 				"Access-Control-Allow-Methods",
 				"GET,HEAD,PUT,PATCH,POST,DELETE",
