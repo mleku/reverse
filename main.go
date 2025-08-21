@@ -470,7 +470,8 @@ func setProxy(mapping map[string]string) (http.Handler, error) {
 				// Backward-compatible header widely used by apps
 				req.Header.Set("X-Forwarded-Proto", "https")
 				clientIP := remoteIP(req.RemoteAddr)
-				req.Header.Set("X-Forwarded-For", clientIP)
+				split := strings.Split(clientIP, ", ")
+				req.Header.Set("X-Forwarded-For", split[0])
 				// Standard RFC 7239 Forwarded header
 				appendForwardedHeader(req)
 				log.I.S(req.Header)
@@ -632,7 +633,8 @@ func newSingleHostReverseProxy(target *url.URL) *httputil.ReverseProxy {
 		// Backward-compatible header widely used by apps
 		req.Header.Set("X-Forwarded-Proto", "https")
 		clientIP := remoteIP(req.RemoteAddr)
-		req.Header.Set("X-Forwarded-For", clientIP)
+		split := strings.Split(clientIP, ", ")
+		req.Header.Set("X-Forwarded-For", split[0])
 		// Standard RFC 7239 Forwarded header
 		appendForwardedHeader(req)
 		log.I.S(req.Header)
