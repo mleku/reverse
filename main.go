@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,8 +32,10 @@ import (
 	"lol.mleku.dev/log"
 )
 
-func main() {
+//go:embed favicon.ico
+var defaultFavicon []byte
 
+func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	if err := run(ctx); err != nil {
@@ -448,6 +451,20 @@ func setProxy(mapping map[string]string) (http.Handler, error) {
 				if err := NostrDNS(hn, ba, mux); err != nil {
 					continue
 				}
+				fin := hn + "/favicon.ico"
+				var fi []byte
+				var err error
+				if fi, err = os.ReadFile(fin); !chk.E(err) {
+					fi = defaultFavicon
+				}
+				mux.HandleFunc(
+					hn+"/favicon.ico",
+					func(writer http.ResponseWriter, request *http.Request) {
+						if _, err = writer.Write(fi); chk.E(err) {
+							return
+						}
+					},
+				)
 				continue
 			}
 		} else if u, err := url.Parse(ba); err == nil {
